@@ -477,9 +477,11 @@ class _SectographScheduleState extends State<SectographSchedule>
     with TickerProviderStateMixin {
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
-  late PageController _pageController;
+  late AnimationController _transitionController;
+  late Animation<double> _scaleAnimation;
+  late Animation<double> _titleFadeAnimation;
+  int _currentIndex = 0;
   Map<String, dynamic>? _currentClass;
-  int _todayIndex = 0;
 
   @override
   void initState() {
@@ -491,9 +493,19 @@ class _SectographScheduleState extends State<SectographSchedule>
     _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
     );
+    _transitionController = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
+    _scaleAnimation = Tween<double>(begin: 0.8, end: 1.0).animate(
+      CurvedAnimation(parent: _transitionController, curve: Curves.easeInOut),
+    );
+    _titleFadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _transitionController, curve: Curves.easeInOut),
+    );
     _updateTodayIndex();
-    _pageController = PageController(initialPage: _todayIndex);
     _animationController.forward();
+    _transitionController.value = 1.0; // Start at full scale and opacity
     _updateCurrentClass();
     // Update current class every minute
     Timer.periodic(const Duration(minutes: 1), (timer) {
@@ -515,15 +527,14 @@ class _SectographScheduleState extends State<SectographSchedule>
     if (oldWidget.schedule != widget.schedule) {
       _updateCurrentClass();
       _updateTodayIndex();
-      _pageController.animateToPage(_todayIndex, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
     }
   }
 
   void _updateTodayIndex() {
     final now = DateTime.now();
     final today = _getTodayString(now);
-    _todayIndex = widget.schedule.indexWhere((day) => day['name'] == today);
-    if (_todayIndex == -1) _todayIndex = 0;
+    _currentIndex = widget.schedule.indexWhere((day) => day['name'] == today);
+    if (_currentIndex == -1) _currentIndex = 0;
   }
 
   void _updateCurrentClass() {
@@ -603,159 +614,202 @@ class _SectographScheduleState extends State<SectographSchedule>
     return null;
   }
 
-  double sweepCalculation(String text, double startAngle, double sweepAngle, double fontSize) {
-    final double textWidth = text.length * fontSize * 0.6;
-    final double radius = 80.0;
-    final double textAngleRadians = textWidth / radius;
-    final double textAngleDegrees = textAngleRadians * (180 / pi);
-    
-    return textAngleDegrees / 2;
+  void _changeDay(int newIndex) {
+    _transitionController.animateTo(0.0, duration: const Duration(milliseconds: 150)).then((_) {
+      setState(() {
+        _currentIndex = newIndex;
+      });
+      _transitionController.animateTo(1.0, duration: const Duration(milliseconds: 150));
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final gpa = widget.attendanceData?['gpa']?.toString() ?? 'N/A';
+    final classes = List<Map<String, dynamic>>.from(widget.schedule[_currentIndex]['classes'] as List<dynamic>);
+    DateTime? minStart;
+    DateTime? maxEnd;
+    for (final classData in classes) {
+      final start = _parseTime(classData['start'] as String);
+      final end = _parseTime(classData['end'] as String);
+      if (start != null && end != null) {
+        if (minStart == null || start.isBefore(minStart)) minStart = start;
+        if (maxEnd == null || end.isAfter(maxEnd)) maxEnd = end;
+      }
+    }
 
-    return FadeTransition(
-      opacity: _fadeAnimation,
-      child: PageView.builder(
-        scrollDirection: Axis.vertical,
-        controller: _pageController,
-        itemCount: widget.schedule.length,
-        itemBuilder: (context, index) {
-          final day = widget.schedule[index];
-          final dayName = day['name'] as String;
-          final classes = List<Map<String, dynamic>>.from(day['classes'] as List<dynamic>);
-          final isToday = index == _todayIndex;
+    return WearScaffold(
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              onHorizontalDragEnd: (details) {
+                if (details.primaryVelocity! > 0) {
+                  // Swipe right, previous day
+                  final newIndex = (_currentIndex - 1 + widget.schedule.length) % widget.schedule.length;
+                  _changeDay(newIndex);
+                } else if (details.primaryVelocity! < 0) {
+                  // Swipe left, next day
+                  final newIndex = (_currentIndex + 1) % widget.schedule.length;
+                  _changeDay(newIndex);
+                }
+              },
+              onTap: () {
+                final day = widget.schedule[_currentIndex];
+                final dayName = day['name'] as String;
+                final isToday = _currentIndex == _todayIndex;
 
-          // Calculate school day range
-          DateTime? minStart;
-          DateTime? maxEnd;
-          for (final classData in classes) {
-            final start = _parseTime(classData['start'] as String);
-            final end = _parseTime(classData['end'] as String);
-            if (start != null && end != null) {
-              if (minStart == null || start.isBefore(minStart)) minStart = start;
-              if (maxEnd == null || end.isAfter(maxEnd)) maxEnd = end;
-            }
-          }
-
-          return GestureDetector(
-            onTap: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (context) => TodayScheduleScreen(
-                    schedule: classes,
-                    title: isToday ? 'Today\'s Schedule' : '$dayName\'s Schedule',
-                    attendanceData: widget.attendanceData,
-                  ),
-                ),
-              );
-            },
-            onLongPress: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (context) => GradeBookScreen(
-                    schedule: classes,
-                    attendanceData: widget.attendanceData,
-                    classGrades: context.read<ScheduleProvider>().classGrades!,
-                  ),
-                ),
-              );
-            },
-            child: Stack(
-              children: [
-                // Circular schedule display
-                CustomPaint(
-                  size: Size.infinite,
-                  painter: DaySchedulePainter(
-                    classes: classes,
-                    currentClass: isToday ? _currentClass : null,
-                    minStart: minStart,
-                    maxEnd: maxEnd,
-                  ),
-                ),
-
-                // Current time indicator (only for today)
-                if (isToday)
-                  CustomPaint(
-                    size: Size.infinite,
-                    painter: TimeIndicatorPainter(
-                      minStart: minStart,
-                      maxEnd: maxEnd,
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (context) => TodayScheduleScreen(
+                      schedule: classes,
+                      title: isToday ? 'Today\'s Schedule' : '$dayName\'s Schedule',
+                      attendanceData: widget.attendanceData,
                     ),
                   ),
+                );
+              },
+              onLongPress: () {
+                final day = widget.schedule[_currentIndex];
 
-                // Time display above the graph
-                Positioned(
-                  bottom: 2,
-                  left: 0,
-                  right: 0,
-                  child: Center(
-                    child: Text(
-                      DateFormat.jm().format(DateTime.now()),
-                      style: const TextStyle(
-                        color: Colors.white70,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w400,
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (context) => GradeBookScreen(
+                      schedule: classes,
+                      attendanceData: widget.attendanceData,
+                      classGrades: context.read<ScheduleProvider>().classGrades!,
+                    ),
+                  ),
+                );
+              },
+              child: Stack(
+                children: [
+                  // Circular schedule display
+                  ScaleTransition(
+                    scale: _scaleAnimation,
+                    child: CustomPaint(
+                      size: Size.infinite,
+                      painter: DaySchedulePainter(
+                        classes: classes,
+                        currentClass: _currentIndex == _todayIndex ? _currentClass : null,
+                        minStart: minStart,
+                        maxEnd: maxEnd,
                       ),
                     ),
                   ),
-                ),
-                
-                // Center display
-                Center(
-                  child: isToday
-                      ? Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (_currentClass != null) ...[
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                decoration: BoxDecoration(
-                                  color: Colors.blue.withOpacity(0.5),
-                                  borderRadius: BorderRadius.circular(16),
-                                  border: Border.all(color: Colors.blue.withOpacity(0.5)),
-                                ),
-                                child: Column(
-                                  children: [
-                                    Text(
-                                      _currentClass!['name'] ?? 'Unknown',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                      textAlign: TextAlign.center,
-                                    ),
-                                    Text(
-                                      _currentClass!['room'] ?? 'N/A',
-                                      style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 10,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ],
-                        )
-                      : Text(
-                          dayName,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 28,
-                            fontWeight: FontWeight.bold,
-                          ),
+
+                  // Current time indicator (only for today)
+                  if (_currentIndex == _todayIndex)
+                    ScaleTransition(
+                      scale: _scaleAnimation,
+                      child: CustomPaint(
+                        size: Size.infinite,
+                        painter: TimeIndicatorPainter(
+                          minStart: minStart,
+                          maxEnd: maxEnd,
                         ),
-                ),
-              ],
+                      ),
+                    ),
+
+                  // Center display
+                  Center(
+                    child: FadeTransition(
+                      opacity: _titleFadeAnimation,
+                      child: _currentIndex == _todayIndex
+                          ? Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (_currentClass != null) ...[
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: Colors.blue.withOpacity(0.5),
+                                      borderRadius: BorderRadius.circular(16),
+                                      border: Border.all(color: Colors.blue.withOpacity(0.5)),
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        Text(
+                                          _currentClass!['name'] ?? 'Unknown',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                        Text(
+                                          _currentClass!['room'] ?? 'N/A',
+                                          style: const TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 10,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ] else ...[
+                                  Column(
+                                    children: [
+                                      Text(
+                                        widget.schedule[_currentIndex]['name'] as String,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 28,
+                                          fontWeight: FontWeight.bold
+                                        )
+                                      ),
+                                      Text(
+                                        "Today",
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w300
+                                        )
+                                      )
+                                    ]
+                                  )
+                                ]
+                              ],
+                            )
+                          : Text(
+                              widget.schedule[_currentIndex]['name'] as String,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 28,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          );
-        },
+          ),
+          // Time display at bottom
+          Positioned(
+            bottom: 2,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Text(
+                DateFormat.jm().format(DateTime.now()),
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
+  }
+
+  int get _todayIndex {
+    final now = DateTime.now();
+    final today = _getTodayString(now);
+    return widget.schedule.indexWhere((day) => day['name'] == today);
   }
 
   String _getTodayString(DateTime now) {
@@ -766,7 +820,7 @@ class _SectographScheduleState extends State<SectographSchedule>
   @override
   void dispose() {
     _animationController.dispose();
-    _pageController.dispose();
+    _transitionController.dispose();
     super.dispose();
   }
 }
