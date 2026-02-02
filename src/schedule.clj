@@ -19,10 +19,10 @@
     (let [parts (str/split cell-content #"<br>")
           clean-parts (map #(str/replace % #"&nbsp;" "") parts)]
       (when (>= (count clean-parts) 4)
-        {:name (str/trim (first clean-parts))
-         :teacher (str/trim (second clean-parts))
-         :room (str/trim (nth clean-parts 2))
-         :time (str/trim (nth clean-parts 3))}))))
+        {:name (-> (first clean-parts) str/trim (str/replace #"\s+" " ") str/trim)
+         :teacher (-> (second clean-parts) str/trim (str/replace #"\s+" " ") str/trim)
+         :room (-> (nth clean-parts 2) str/trim (str/replace #"\s+" " ") str/trim)
+         :time (-> (nth clean-parts 3) str/trim (str/replace #"\s+" " ") str/trim)}))))
 
 (defn extract-text [element]
   "Extract text content from hickory element, preserving <br> tags for parsing"
@@ -31,7 +31,7 @@
     (let [tag (:tag element)
           content (:content element)]
       (cond
-        (or (= tag :a) (= tag :img)) ""
+        (= tag :img) ""
         (= tag :br) "<br>"
         (seq content) (apply str (map extract-text content))
         :else ""))))
@@ -162,3 +162,107 @@
                             :as :text})
         html-body (:body response)]
     (parse-attendance-totals html-body)))
+
+(defn parse-class-grades [class-row]
+  "Parse a single class row from the grades table to extract grade and attendance data.
+   Returns a map with :class-name, :s2, :p1, :s1, :absences, :tardies
+   Table structure: Exp (0) | Last Week (1-5) | This Week (6-10) | Course (11) | S2 (12) | P1 (13) | S1 (14) | Absences (15) | Tardies (16)"
+  (when (map? class-row)
+    (let [cells (s/select (s/tag :td) class-row)
+          cell-count (count cells)]
+      (when (>= cell-count 17)
+        (let [; Extract class name from the Course cell (column 11)
+              class-cell (nth cells 11)
+              ; Get the text content and extract the class name (before the first <br> or link)
+              raw-text (extract-text class-cell)
+              class-name (when raw-text
+                           (let [cleaned (-> raw-text
+                                           (str/replace #"<br>.*" "")  ; Remove everything after <br>
+                                           (str/replace #"&nbsp;" " ")
+                                           str/trim
+                                           (str/replace #"\s+" " ")  ; Replace multiple spaces with single space
+                                           str/trim)]
+                             (when-not (str/blank? cleaned)
+                               cleaned)))
+              
+              ; Extract semester grades (S2, P1, S1) - columns 12, 13, 14
+              s2-cell (nth cells 12)
+              p1-cell (nth cells 13)
+              s1-cell (nth cells 14)
+              
+              ; Extract attendance data - columns 15, 16
+              abs-cell (nth cells 15)
+              tar-cell (nth cells 16)
+              
+              ; Helper to extract letter grade (like "C+", "A", "B-") or numeric percentage
+              extract-grade (fn [cell]
+                (when-let [text (extract-text cell)]
+                  (let [cleaned (str/trim text)]
+                    ; Try to find letter grade first (A+, A, A-, B+, etc.)
+                    (if-let [[_ grade] (re-find #"([A-F][+-]?)" cleaned)]
+                      grade
+                      ; Otherwise look for numeric percentage
+                      (when-let [[_ num] (re-find #"(\d+\.?\d*)" cleaned)]
+                        num)))))
+              
+              ; Helper to extract numeric value from links like attendance counts
+              extract-number (fn [cell]
+                (when-let [text (extract-text cell)]
+                  (when-let [[_ num] (re-find #"(\d+)" text)]
+                    (Integer/parseInt num))))]
+          
+          (when (and class-name (not (str/blank? class-name)))
+            {:class-name class-name
+             :s2 (extract-grade s2-cell)
+             :p1 (extract-grade p1-cell)
+             :s1 (extract-grade s1-cell)
+             :absences (or (extract-number abs-cell) 0)
+             :tardies (or (extract-number tar-cell) 0)}))))))
+
+(defn fetch-class-grades
+  "Fetch the grades and attendance page from PowerSchool with per-class breakdown."
+  [cookies ps-base]
+  (let [grades-url (str "https://" ps-base ".powerschool.com/guardian/home.html")
+        response (http/get grades-url
+                           {:headers {"Cookie" (str/join "; " (map #(str (key %) "=" (val %)) cookies))
+                                      "User-Agent" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36"
+                                      "Accept" "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+                                      "Accept-Language" "en-US,en;q=0.9"}
+                            :encoding "UTF-8"
+                            :as :text})
+        html-body (:body response)
+        parsed-html (hickory/parse html-body)
+        hickory-doc (hickory/as-hickory parsed-html)
+        
+        ; Find the grades table by class or first table as fallback
+        grade-table (try
+                      (when (map? hickory-doc)
+                        (or (first (s/select (s/and (s/tag :table) (s/class "linkDescList")) hickory-doc))
+                            (first (s/select (s/tag :table) hickory-doc))))
+                      (catch Exception e
+                        (println "Error selecting grade table:" e)
+                        nil))
+        grade-rows (try
+                     (if (and grade-table (map? grade-table)) 
+                       (rest (s/select (s/tag :tr) grade-table)) 
+                       [])
+                     (catch Exception e
+                       (println "Error selecting grade rows:" e)
+                       []))
+        
+        ; Parse all class grades
+        class-grades (try
+                       (into {} (keep (fn [row]
+                                        (try
+                                          (when (and row (map? row))
+                                            (when-let [grade-data (parse-class-grades row)]
+                                              [(:class-name grade-data) (dissoc grade-data :class-name)]))
+                                          (catch Exception e
+                                            (println "Error parsing class grade row:" e)
+                                            nil)))
+                                      grade-rows))
+                       (catch Exception e
+                         (println "Error building class grades map:" e)
+                         {}))]
+    
+    {:classes class-grades}))

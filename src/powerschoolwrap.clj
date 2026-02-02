@@ -8,7 +8,6 @@
             [ring.adapter.jetty :as jetty]
             [ring.middleware.params :refer [wrap-params]]
             [ring.util.response :as response]
-            [hiccup.core :as h]
             [hiccup.form :as form]
             [hiccup.page :as page]))
 
@@ -67,7 +66,11 @@
             (form/form-to [:post "/test-grades"]
                           (form/hidden-field "cookies-json" (json/generate-string (:cookies result)))
                           (form/hidden-field "ps-base" ps-base)
-                          (form/submit-button "Test Grades Fetch"))]
+                          (form/submit-button {:style "margin-right: 10px;"} "Test Grades Fetch"))
+            (form/form-to [:post "/test-class-grades"]
+                          (form/hidden-field "cookies-json" (json/generate-string (:cookies result)))
+                          (form/hidden-field "ps-base" ps-base)
+                          (form/submit-button "Test Class Grades Fetch"))]
            [:div
             [:p "Authentication failed: " (:error result)]])]
         [:p [:a {:href "/"} "Back to test form"]]])))
@@ -119,6 +122,30 @@
            [:div
             [:p "Grades fetch failed: " (:error result)]])]
         [:p [:a {:href "/"} "Back to test form"]]])))
+  (POST "/test-class-grades" [cookies-json ps-base]
+    (let [result (try
+                   (let [class-grades-data (schedule/fetch-class-grades (json/parse-string cookies-json) ps-base)]
+                     {:success true :data class-grades-data})
+                   (catch Exception e
+                     {:success false :error (.getMessage e)}))]
+      (page/html5
+       [:head
+        [:title "Class Grades Test Result"]
+        [:style "body { font-family: Arial, sans-serif; margin: 40px; }
+                 .result { margin-top: 20px; padding: 10px; border: 1px solid #ccc; }
+                 .success { color: green; }
+                 .error { color: red; }
+                 pre { white-space: pre-wrap; }"]]
+       [:body
+        [:h1 "Class Grades Fetch Test Result"]
+        [:div {:class (if (:success result) "result success" "result error")}
+         (if (:success result)
+           [:div
+            [:p "Class grades fetched successfully!"]
+            [:pre (pr-str (:data result))]]
+           [:div
+            [:p "Class grades fetch failed: " (:error result)]])]
+        [:p [:a {:href "/"} "Back to test form"]]])))
   (POST "/authenticate" [username password ps-base]
     (let [cookies (auth/authenticate-user username password ps-base)]
       (response/response (json/generate-string cookies))))
@@ -130,6 +157,10 @@
     (let [cookies (json/parse-string cookies-json)
           grades-data (schedule/fetch-attendance-totals cookies ps-base)]
       (response/response (json/generate-string grades-data))))
+  (POST "/class-grades" [cookies-json ps-base]
+    (let [cookies (json/parse-string cookies-json)
+          class-grades-data (schedule/fetch-class-grades cookies ps-base)]
+      (response/response (json/generate-string class-grades-data))))
   (route/not-found "Not Found"))
 
 (defn -main

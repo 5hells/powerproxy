@@ -5,8 +5,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import 'dart:math';
 import 'package:flutter/services.dart';
+import 'dart:ui' show TextDirection;
 import 'dart:async';
 import 'package:wear_plus/wear_plus.dart';
+import 'package:intl/intl.dart' hide TextDirection;
+import 'package:arc_text/arc_text.dart';
 
 void main() {
   runApp(
@@ -113,11 +116,13 @@ class _AuthCheckScreenState extends State<AuthCheckScreen> {
 class ScheduleProvider extends ChangeNotifier {
   List<Map<String, dynamic>> _schedule = [];
   Map<String, dynamic>? _attendanceData;
+  Map<String, dynamic>? _classGrades;
   bool _isLoading = false;
   String? _error;
 
   List<Map<String, dynamic>> get schedule => _schedule;
   Map<String, dynamic>? get attendanceData => _attendanceData;
+  Map<String, dynamic>? get classGrades => _classGrades;
   bool get isLoading => _isLoading;
   String? get error => _error;
 
@@ -126,67 +131,98 @@ class ScheduleProvider extends ChangeNotifier {
     _error = null;
     notifyListeners();
 
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final username = prefs.getString('username');
-      final password = prefs.getString('password');
-      final psBase = prefs.getString('ps_base') ?? 'holyghostprep';
-      final apiUrl = prefs.getString('api_url') ?? 'http://192.168.1.100:3000';
+    int retryCount = 0;
+    const maxRetries = 10; // Allow more retries
+    const initialDelay = Duration(seconds: 2);
 
-      if (username == null || password == null || username.isEmpty || password.isEmpty) {
-        throw Exception('Please set credentials in settings');
+    while (retryCount < maxRetries) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final username = prefs.getString('username');
+        final password = prefs.getString('password');
+        final psBase = prefs.getString('ps_base') ?? 'holyghostprep';
+        final apiUrl = prefs.getString('api_url') ?? 'http://192.168.1.100:3000';
+
+        if (username == null || password == null || username.isEmpty || password.isEmpty) {
+          throw Exception('Please set credentials in settings');
+        }
+
+        // Authenticate
+        final authResponse = await http.post(
+          Uri.parse('$apiUrl/authenticate'),
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: {
+            'username': username,
+            'password': password,
+            'ps-base': psBase,
+          },
+        );
+
+        if (authResponse.statusCode != 200) {
+          throw Exception('Authentication failed');
+        }
+
+        final cookies = json.decode(utf8.decode(authResponse.bodyBytes));
+
+        // Get schedule
+        final scheduleResponse = await http.post(
+          Uri.parse('$apiUrl/schedule'),
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: {
+            'cookies-json': json.encode(cookies),
+            'ps-base': psBase,
+          },
+        );
+
+        if (scheduleResponse.statusCode == 200) {
+          _schedule = List<Map<String, dynamic>>.from(json.decode(utf8.decode(scheduleResponse.bodyBytes)));
+        }
+
+        // Get attendance/grades
+        final gradesResponse = await http.post(
+          Uri.parse('$apiUrl/grades'),
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: {
+            'cookies-json': json.encode(cookies),
+            'ps-base': psBase,
+          },
+        );
+
+        if (gradesResponse.statusCode == 200) {
+          _attendanceData = json.decode(utf8.decode(gradesResponse.bodyBytes));
+        }
+
+        // Get per-class grades
+        final classGradesResponse = await http.post(
+          Uri.parse('$apiUrl/class-grades'),
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: {
+            'cookies-json': json.encode(cookies),
+            'ps-base': psBase,
+          },
+        );
+
+        if (classGradesResponse.statusCode == 200) {
+          _classGrades = json.decode(utf8.decode(classGradesResponse.bodyBytes));
+        }
+
+        // Success
+        _isLoading = false;
+        notifyListeners();
+        return;
+
+      } catch (e) {
+        retryCount++;
+        if (retryCount >= maxRetries) {
+          _error = 'Failed to load schedule after $maxRetries attempts: ${e.toString()}';
+          _isLoading = false;
+          notifyListeners();
+          return;
+        }
+        // Exponential back-off
+        final delay = initialDelay * (1 << (retryCount - 1));
+        await Future.delayed(delay);
       }
-
-      // Authenticate
-      final authResponse = await http.post(
-        Uri.parse('$apiUrl/authenticate'),
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: {
-          'username': username,
-          'password': password,
-          'ps-base': psBase,
-        },
-      );
-
-      if (authResponse.statusCode != 200) {
-        throw Exception('Authentication failed');
-      }
-
-      final cookies = json.decode(utf8.decode(authResponse.bodyBytes));
-
-      // Get schedule
-      final scheduleResponse = await http.post(
-        Uri.parse('$apiUrl/schedule'),
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: {
-          'cookies-json': json.encode(cookies),
-          'ps-base': psBase,
-        },
-      );
-
-      if (scheduleResponse.statusCode == 200) {
-        _schedule = List<Map<String, dynamic>>.from(json.decode(utf8.decode(scheduleResponse.bodyBytes)));
-      }
-
-      // Get attendance/grades
-      final gradesResponse = await http.post(
-        Uri.parse('$apiUrl/grades'),
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: {
-          'cookies-json': json.encode(cookies),
-          'ps-base': psBase,
-        },
-      );
-
-      if (gradesResponse.statusCode == 200) {
-        _attendanceData = json.decode(utf8.decode(gradesResponse.bodyBytes));
-      }
-
-    } catch (e) {
-      _error = e.toString();
-    } finally {
-      _isLoading = false;
-      notifyListeners();
     }
   }
 }
@@ -465,6 +501,12 @@ class _SectographScheduleState extends State<SectographSchedule>
         _updateCurrentClass();
       }
     });
+    // Update hand position every second
+    Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
   }
 
   @override
@@ -561,6 +603,15 @@ class _SectographScheduleState extends State<SectographSchedule>
     return null;
   }
 
+  double sweepCalculation(String text, double startAngle, double sweepAngle, double fontSize) {
+    final double textWidth = text.length * fontSize * 0.6;
+    final double radius = 80.0;
+    final double textAngleRadians = textWidth / radius;
+    final double textAngleDegrees = textAngleRadians * (180 / pi);
+    
+    return textAngleDegrees / 2;
+  }
+
   @override
   Widget build(BuildContext context) {
     final gpa = widget.attendanceData?['gpa']?.toString() ?? 'N/A';
@@ -596,6 +647,18 @@ class _SectographScheduleState extends State<SectographSchedule>
                   builder: (context) => TodayScheduleScreen(
                     schedule: classes,
                     title: isToday ? 'Today\'s Schedule' : '$dayName\'s Schedule',
+                    attendanceData: widget.attendanceData,
+                  ),
+                ),
+              );
+            },
+            onLongPress: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => GradeBookScreen(
+                    schedule: classes,
+                    attendanceData: widget.attendanceData,
+                    classGrades: context.read<ScheduleProvider>().classGrades!,
                   ),
                 ),
               );
@@ -623,34 +686,34 @@ class _SectographScheduleState extends State<SectographSchedule>
                     ),
                   ),
 
+                // Time display above the graph
+                Positioned(
+                  bottom: 2,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Text(
+                      DateFormat.jm().format(DateTime.now()),
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w400,
+                      ),
+                    ),
+                  ),
+                ),
+                
                 // Center display
                 Center(
                   child: isToday
                       ? Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Text(
-                              'GPA',
-                              style: TextStyle(
-                                color: Colors.white70,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w300,
-                              ),
-                            ),
-                            Text(
-                              gpa,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 28,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
                             if (_currentClass != null) ...[
-                              const SizedBox(height: 8),
                               Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                 decoration: BoxDecoration(
-                                  color: Colors.blue.withOpacity(0.2),
+                                  color: Colors.blue.withOpacity(0.5),
                                   borderRadius: BorderRadius.circular(16),
                                   border: Border.all(color: Colors.blue.withOpacity(0.5)),
                                 ),
@@ -769,6 +832,13 @@ class DaySchedulePainter extends CustomPainter {
 
     // Draw class sectors
     _drawClasses(canvas, center, radius, sortedClasses, schoolMinStart, totalMinutes);
+
+    // Draw center circle to make sectors appear as arcs
+    final centerCircleRadius = 40.0;
+    final centerPaint = Paint()
+      ..color = const Color(0xFF1E1E1E)
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(center, centerCircleRadius, centerPaint);
   }
 
   void _drawClasses(Canvas canvas, Offset center, double radius, List<Map<String, dynamic>> sortedClasses, DateTime schoolMinStart, double totalMinutes) {
@@ -848,7 +918,7 @@ class DaySchedulePainter extends CustomPainter {
             ),
           ],
         ),
-        textDirection: TextDirection.ltr,
+        textDirection: TextDirection.ltr
       );
       textPainter.layout();
       textPainter.paint(
@@ -884,31 +954,126 @@ class TimeIndicatorPainter extends CustomPainter {
 
     final center = Offset(size.width / 2, size.height / 2);
     final now = DateTime.now();
+    
+    // Create a DateTime object with just the time components for comparison
+    final currentTime = DateTime(0, 1, 1, now.hour, now.minute, now.second);
+    
     final totalMinutes = maxEnd!.difference(minStart!).inMinutes.toDouble();
-    final currentMinutes = now.difference(minStart!).inMinutes.toDouble();
+    final currentMinutes = currentTime.difference(minStart!).inMinutes.toDouble();
 
     if (currentMinutes < 0 || currentMinutes > totalMinutes) return; // Don't draw if outside school day
 
     // Calculate angle based on current time within school day
     final angle = (currentMinutes / totalMinutes) * 2 * pi - pi / 2;
-    final radius = size.width / 2 - 15;
+    final radius = size.width / 2 - 20; // Match the sector radius
+    final centerCircleRadius = 40.0;
 
-    final indicatorPaint = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3
-      ..strokeCap = StrokeCap.round;
-
-    // Draw time indicator line
     final endPoint = Offset(
       center.dx + radius * cos(angle),
       center.dy + radius * sin(angle),
     );
 
-    canvas.drawLine(center, endPoint, indicatorPaint);
+    // Start point from edge of center circle
+    final startPoint = Offset(
+      center.dx + centerCircleRadius * cos(angle),
+      center.dy + centerCircleRadius * sin(angle),
+    );
 
-    // Draw small circle at end
-    canvas.drawCircle(endPoint, 4, Paint()..color = Colors.white);
+    // Draw hand shadow first
+    final shadowPaint = Paint()
+      ..color = Colors.black.withOpacity(0.5)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 6
+      ..strokeCap = StrokeCap.round;
+
+    canvas.drawLine(startPoint, endPoint, shadowPaint);
+
+    // Draw the clock hand as a line
+    final handPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+
+    canvas.drawLine(startPoint, endPoint, handPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+class TimeRemainingPainter extends CustomPainter {
+  final Map<String, dynamic>? currentClass;
+  final DateTime? minStart;
+  final DateTime? maxEnd;
+
+  TimeRemainingPainter({this.currentClass, this.minStart, this.maxEnd});
+
+  DateTime? _parseTime(String timeStr) {
+    final regex = RegExp(r'(\d{1,2}):(\d{2})\s*(AM|PM)');
+    final match = regex.firstMatch(timeStr.trim());
+    if (match != null) {
+      final hour = int.parse(match.group(1)!);
+      final minute = int.parse(match.group(2)!);
+      final isPM = match.group(3) == 'PM';
+      final adjustedHour = isPM && hour != 12 ? hour + 12 : (hour == 12 && !isPM ? 0 : hour);
+      return DateTime(0, 1, 1, adjustedHour, minute);
+    }
+    return null;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (currentClass == null || minStart == null || maxEnd == null) return;
+
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 20;
+    final now = DateTime.now();
+
+    // Parse class end time
+    final endStr = currentClass!['end'] as String?;
+    if (endStr == null) return;
+
+    final endTime = _parseTime(endStr);
+    if (endTime == null) return;
+
+    // Calculate remaining time
+    final endDateTime = DateTime(now.year, now.month, now.day, endTime.hour, endTime.minute);
+    final remaining = endDateTime.difference(now);
+
+    if (remaining.isNegative) return; // Class already ended
+
+    // Format remaining time
+    final hours = remaining.inHours;
+    final minutes = remaining.inMinutes % 60;
+    final timeStr = hours > 0 ? '${hours}h ${minutes}m' : '${minutes}m';
+
+    // Calculate angle for class end
+    final totalMinutes = maxEnd!.difference(minStart!).inMinutes.toDouble();
+    final endMinutes = endTime.difference(minStart!).inMinutes.toDouble();
+
+    final angle = (endMinutes / totalMinutes) * 2 * pi - pi / 2;
+    final labelRadius = radius + 25;
+    final labelX = center.dx + labelRadius * cos(angle);
+    final labelY = center.dy + labelRadius * sin(angle);
+
+    // Draw time remaining label
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: timeStr,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    textPainter.layout();
+    textPainter.paint(
+      canvas,
+      Offset(labelX - textPainter.width / 2, labelY - textPainter.height / 2),
+    );
   }
 
   @override
@@ -918,8 +1083,9 @@ class TimeIndicatorPainter extends CustomPainter {
 class TodayScheduleScreen extends StatelessWidget {
   final List<Map<String, dynamic>> schedule;
   final String title;
+  final Map<String, dynamic>? attendanceData;
 
-  const TodayScheduleScreen({super.key, required this.schedule, this.title = 'Today\'s Schedule'});
+  const TodayScheduleScreen({super.key, required this.schedule, this.title = 'Today\'s Schedule', this.attendanceData});
 
   @override
   Widget build(BuildContext context) {
@@ -1071,5 +1237,209 @@ class TodayScheduleScreen extends StatelessWidget {
       return DateTime(0, 1, 1, adjustedHour, minute);
     }
     return null;
+  }
+}
+
+class GradeBookScreen extends StatelessWidget {
+  final List<Map<String, dynamic>> schedule;
+  final Map<String, dynamic>? attendanceData;
+  final Map<String, dynamic> classGrades;
+
+  const GradeBookScreen({super.key, required this.schedule, this.attendanceData, required this.classGrades});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      body: schedule.isEmpty
+          ? const Center(
+              child: Text(
+                'No classes',
+                style: TextStyle(color: Colors.white70),
+              ),
+            )
+          : ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: schedule.length,
+              itemBuilder: (context, index) {
+                final classData = schedule[index];
+                final className = classData['name'] as String? ?? 'Unknown';
+                final room = classData['room'] as String? ?? 'N/A';
+                final teacher = classData['teacher'] as String? ?? 'N/A';
+                final startTime = classData['start'] as String? ?? 'N/A';
+                final endTime = classData['end'] as String? ?? 'N/A';
+
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  color: Theme.of(context).cardTheme.color,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          className,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            color: Colors.white,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        _buildDetailRow('Teacher', teacher),
+                        _buildDetailRow('Room', room),
+                        _buildDetailRow('Time', '$startTime - $endTime'),
+                        const SizedBox(height: 10),
+                        Text(
+                          'Grades & Attendance:',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.white70,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        _buildGradeInfo(className),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+    );
+  }
+
+  Widget _buildDetailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          Text(
+            '$label: ',
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGradeInfo(String className) {
+    // Extract grades from classGrades map
+    String s2 = 'N/A';
+    String p1 = 'N/A';
+    String s1 = 'N/A';
+    String absences = 'N/A';
+    String tardies = 'N/A';
+
+    if (classGrades.isNotEmpty && classGrades.containsKey('classes')) {
+      final classesData = classGrades['classes'] as Map<String, dynamic>?;
+      if (classesData != null && classesData.containsKey(className)) {
+        final gradeData = classesData[className] as Map<String, dynamic>;
+        
+        s2 = gradeData['s2']?.toString() ?? 'N/A';
+        p1 = gradeData['p1']?.toString() ?? 'N/A';
+        s1 = gradeData['s1']?.toString() ?? 'N/A';
+        absences = gradeData['absences']?.toString() ?? 'N/A';
+        tardies = gradeData['tardies']?.toString() ?? 'N/A';
+      }
+    }
+
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _buildGradeChip('S2', s2),
+            _buildGradeChip('P1', p1),
+            _buildGradeChip('S1', s1),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _buildAttendanceChip('Absences', absences),
+            _buildAttendanceChip('Tardies', tardies),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGradeChip(String label, String value) {
+    return Column(
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 10,
+            color: Colors.white70,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.blue.withValues(alpha: 0.3),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            value,
+            style: const TextStyle(
+              color: Colors.blue,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAttendanceChip(String label, String value) {
+    return Column(
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 10,
+            color: Colors.white70,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.orange.withValues(alpha: 0.3),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            value,
+            style: const TextStyle(
+              color: Colors.orange,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }
