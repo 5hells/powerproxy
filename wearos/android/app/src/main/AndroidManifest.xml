@@ -44,6 +44,8 @@
         <service
             android:name=".CurrentClassDataSourceService"
             android:exported="true"
+            android:label="Current Class Complication"
+            android:icon="@drawable/heroicons_zap"
             android:permission="com.google.android.wearable.permission.BIND_COMPLICATION_PROVIDER">
             <intent-filter>
                 <action android:name="android.support.wearable.complications.ACTION_COMPLICATION_UPDATE_REQUEST"/>
@@ -53,7 +55,7 @@
                 android:value="SHORT_TEXT"/>
             <meta-data
                 android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS"
-                android:value="0"/>
+                android:value="300"/>
         </service>
     </application>
     <!-- Required to query activities that can process text, see:
