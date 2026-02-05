@@ -5,11 +5,124 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import 'dart:math';
 import 'package:flutter/services.dart';
-import 'dart:ui' show TextDirection;
 import 'dart:async';
-import 'package:wear_plus/wear_plus.dart';
 import 'package:intl/intl.dart' hide TextDirection;
-import 'package:arc_text/arc_text.dart';
+
+import 'dart:math' as math;
+
+/// A widget that displays text in an arc shape.
+class ArcText extends StatelessWidget {
+  const ArcText({
+    super.key,
+    required this.radius,
+    required this.text,
+    required this.textStyle,
+    this.startAngle = 0,
+    this.alignment = Alignment.center,
+  });
+
+  /// Radius of the arc.
+  final double radius;
+
+  /// Text to display in an arc shape.
+  final String text;
+
+  /// Starting angle of the text.
+  final double startAngle;
+
+  /// Style of the text.
+  final TextStyle textStyle;
+
+  /// Alignment for positioning the arc text.
+  final Alignment alignment;
+
+  @override
+  Widget build(BuildContext context) => SizedBox.expand(
+        child: CustomPaint(
+          painter: _ArcTextPainter(
+            radius,
+            text,
+            textStyle,
+            initialAngle: startAngle,
+            alignment: alignment,
+          ),
+        ),
+      );
+}
+
+class _ArcTextPainter extends CustomPainter {
+  _ArcTextPainter(
+    this.radius,
+    this.text,
+    this.textStyle, {
+    this.initialAngle = 0,
+    this.alignment = Alignment.center,
+  });
+
+  final double radius;
+  final String text;
+  final double initialAngle;
+  final TextStyle textStyle;
+  final Alignment alignment;
+
+  final _textPainter = TextPainter(textDirection: TextDirection.ltr);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Calculate center point based on alignment
+    late Offset center;
+    
+    if (alignment == Alignment.topCenter) {
+      center = Offset(size.width / 2, 50);
+    } else if (alignment == Alignment.bottomCenter) {
+      center = Offset(size.width / 2, size.height - 50);
+    } else {
+      center = Offset(size.width / 2, size.height / 2);
+    }
+
+    // Translate to center point
+    canvas.translate(center.dx, center.dy);
+
+    // Pre-calculate total text angle to center it
+    double totalAngle = 0;
+    for (int i = 0; i < text.length; i++) {
+      _textPainter.text = TextSpan(text: text[i], style: textStyle);
+      _textPainter.layout(minWidth: 0, maxWidth: double.maxFinite);
+      final d = _textPainter.width;
+      final alpha = 2 * math.asin(d / (2 * radius));
+      totalAngle += alpha;
+    }
+
+    // Center the text on the arc
+    double startAngle = initialAngle - totalAngle / 2;
+    
+    double angle = startAngle;
+    for (int i = 0; i < text.length; i++) {
+      angle += _drawLetter(canvas, text[i], angle);
+    }
+  }
+
+  double _drawLetter(Canvas canvas, String letter, double prevAngle) {
+    _textPainter.text = TextSpan(text: letter, style: textStyle);
+    _textPainter.layout(
+      minWidth: 0,
+      maxWidth: double.maxFinite,
+    );
+
+    final double d = _textPainter.width;
+    final double alpha = 2 * math.asin(d / (2 * radius));
+
+    // Rotate to angle and draw
+    canvas.rotate(alpha / 2);
+    _textPainter.paint(canvas, Offset(0, -radius));
+    canvas.rotate(alpha / 2);
+
+    return alpha;
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
 
 void main() {
   runApp(
@@ -126,13 +239,105 @@ class ScheduleProvider extends ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
 
+  double get gpa {
+    if (_classGrades == null || !_classGrades!.containsKey('classes')) return 0.0;
+    final classes = _classGrades!['classes'] as Map<String, dynamic>;
+    double totalPoints = 0.0;
+    int count = 0;
+    for (final gradeData in classes.values) {
+      if (gradeData is Map<String, dynamic>) {
+        final grade = gradeData['s2'] as String? ?? gradeData['p1'] as String? ?? gradeData['s1'] as String?;
+        if (grade != null && grade.isNotEmpty) {
+          final points = _letterToGpa(grade);
+          if (points != null) {
+            totalPoints += points;
+            count++;
+          }
+        }
+      }
+    }
+    return count > 0 ? totalPoints / count : 0.0;
+  }
+
+  static double? _letterToGpa(String grade) {
+    final cleanGrade = grade.toUpperCase().trim();
+    switch (cleanGrade) {
+      case 'A+':
+      case 'A':
+        return 4.0;
+      case 'A-':
+        return 3.67;
+      case 'B+':
+        return 3.33;
+      case 'B':
+        return 3.0;
+      case 'B-':
+        return 2.67;
+      case 'C+':
+        return 2.33;
+      case 'C':
+        return 2.0;
+      case 'C-':
+        return 1.67;
+      case 'D+':
+        return 1.33;
+      case 'D':
+        return 1.0;
+      case 'F':
+        return 0.0;
+      default:
+        return null;
+    }
+  }
+
   Future<void> loadSchedule() async {
     _isLoading = true;
     _error = null;
     notifyListeners();
 
+    // First, load from cache
+    await _loadFromCache();
+
+    // Then load from network in background
+    _loadFromNetwork();
+  }
+
+  Future<void> _loadFromCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    final scheduleJson = prefs.getString('cached_schedule');
+    final attendanceJson = prefs.getString('cached_attendance');
+    final gradesJson = prefs.getString('cached_grades');
+
+    if (scheduleJson != null) {
+      try {
+        _schedule = List<Map<String, dynamic>>.from(json.decode(scheduleJson));
+      } catch (e) {
+        // Ignore invalid cache
+      }
+    }
+
+    if (attendanceJson != null) {
+      try {
+        _attendanceData = json.decode(attendanceJson);
+      } catch (e) {
+        // Ignore
+      }
+    }
+
+    if (gradesJson != null) {
+      try {
+        _classGrades = json.decode(gradesJson);
+      } catch (e) {
+        // Ignore
+      }
+    }
+
+    notifyListeners();
+  }
+
+  Future<void> _loadFromNetwork() async {
     int retryCount = 0;
-    const maxRetries = 10; // Allow more retries
+    const maxRetries = 10;
     const initialDelay = Duration(seconds: 2);
 
     while (retryCount < maxRetries) {
@@ -176,6 +381,8 @@ class ScheduleProvider extends ChangeNotifier {
 
         if (scheduleResponse.statusCode == 200) {
           _schedule = List<Map<String, dynamic>>.from(json.decode(utf8.decode(scheduleResponse.bodyBytes)));
+          // Cache it
+          await prefs.setString('cached_schedule', json.encode(_schedule));
         }
 
         // Get attendance/grades
@@ -190,6 +397,7 @@ class ScheduleProvider extends ChangeNotifier {
 
         if (gradesResponse.statusCode == 200) {
           _attendanceData = json.decode(utf8.decode(gradesResponse.bodyBytes));
+          await prefs.setString('cached_attendance', json.encode(_attendanceData));
         }
 
         // Get per-class grades
@@ -204,6 +412,7 @@ class ScheduleProvider extends ChangeNotifier {
 
         if (classGradesResponse.statusCode == 200) {
           _classGrades = json.decode(utf8.decode(classGradesResponse.bodyBytes));
+          await prefs.setString('cached_grades', json.encode(_classGrades));
         }
 
         // Success
@@ -476,12 +685,17 @@ class SectographSchedule extends StatefulWidget {
 class _SectographScheduleState extends State<SectographSchedule>
     with TickerProviderStateMixin {
   late AnimationController _animationController;
-  late Animation<double> _fadeAnimation;
   late AnimationController _transitionController;
   late Animation<double> _scaleAnimation;
   late Animation<double> _titleFadeAnimation;
   int _currentIndex = 0;
   Map<String, dynamic>? _currentClass;
+  bool _isOverview = false;
+  late AnimationController _overviewController;
+  late Animation<double> _overviewScale;
+  late Animation<double> _overviewFade;
+  late AnimationController _rotationController;
+  Animation<double> _rotationAnimation = AlwaysStoppedAnimation(0.0);
 
   @override
   void initState() {
@@ -489,9 +703,6 @@ class _SectographScheduleState extends State<SectographSchedule>
     _animationController = AnimationController(
       duration: const Duration(milliseconds: 800),
       vsync: this,
-    );
-    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
     );
     _transitionController = AnimationController(
       duration: const Duration(milliseconds: 300),
@@ -503,6 +714,23 @@ class _SectographScheduleState extends State<SectographSchedule>
     _titleFadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(parent: _transitionController, curve: Curves.easeInOut),
     );
+    _overviewController = AnimationController(
+      duration: const Duration(milliseconds: 500),
+      vsync: this,
+    );
+    _overviewScale = Tween<double>(begin: 1.0, end: 0.8).animate(
+      CurvedAnimation(parent: _overviewController, curve: Curves.easeInOut),
+    );
+    _overviewFade = Tween<double>(begin: 1.0, end: 0.0).animate(
+      CurvedAnimation(parent: _overviewController, curve: Curves.easeInOut),
+    );
+    _rotationController = AnimationController(
+      duration: const Duration(milliseconds: 800),
+      vsync: this,
+    );
+    _rotationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _rotationController, curve: Curves.easeInOut),
+    );
     _updateTodayIndex();
     _animationController.forward();
     _transitionController.value = 1.0; // Start at full scale and opacity
@@ -513,8 +741,8 @@ class _SectographScheduleState extends State<SectographSchedule>
         _updateCurrentClass();
       }
     });
-    // Update hand position every second
-    Timer.periodic(const Duration(seconds: 1), (timer) {
+    // Update time indicator every 5 seconds
+    Timer.periodic(const Duration(seconds: 5), (timer) {
       if (mounted) {
         setState(() {});
       }
@@ -547,19 +775,13 @@ class _SectographScheduleState extends State<SectographSchedule>
     final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty ? List<Map<String, dynamic>>.from(todayDay['classes'] as List<dynamic>) : [];
 
     _currentClass = _getCurrentClass(todaySchedule, now);
-    _sendCurrentClassToComplication();
+    _saveCurrentClass();
   }
 
-  Future<void> _sendCurrentClassToComplication() async {
-    try {
-      const platform = MethodChannel('com.example.wearos/complication');
-      await platform.invokeMethod('updateCurrentClass', {
-        'name': _currentClass?['name'] ?? 'No Class',
-        'room': _currentClass?['room'] ?? 'N/A',
-      });
-    } catch (e) {
-      // Ignore errors
-    }
+  Future<void> _saveCurrentClass() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('class_name', _currentClass?['name'] ?? '');
+    await prefs.setString('room', _currentClass?['room'] ?? '');
   }
 
   Map<String, dynamic>? _getCurrentClass(List<Map<String, dynamic>> todaySchedule, DateTime now) {
@@ -581,26 +803,6 @@ class _SectographScheduleState extends State<SectographSchedule>
     return null;
   }
 
-  List<DateTime>? _parseTimeRange(String timeStr) {
-    final parts = timeStr.split(' - ');
-    if (parts.length == 2) {
-      try {
-        final start = _parseTime(parts[0]);
-        final end = _parseTime(parts[1]);
-        if (start != null && end != null) {
-          final now = DateTime.now();
-          return [
-            DateTime(now.year, now.month, now.day, start.hour, start.minute),
-            DateTime(now.year, now.month, now.day, end.hour, end.minute),
-          ];
-        }
-      } catch (e) {
-        // Ignore parsing errors
-      }
-    }
-    return null;
-  }
-
   DateTime? _parseTime(String timeStr) {
     final regex = RegExp(r'(\d{1,2}):(\d{2})\s*(AM|PM)');
     final match = regex.firstMatch(timeStr.trim());
@@ -614,6 +816,55 @@ class _SectographScheduleState extends State<SectographSchedule>
     return null;
   }
 
+  int getRemainingClassesCount() {
+    final now = DateTime.now();
+    final today = _getTodayString(now);
+    final todayDay = widget.schedule.firstWhere(
+      (day) => day['name'] == today,
+      orElse: () => <String, dynamic>{},
+    );
+    final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty ? List<Map<String, dynamic>>.from(todayDay['classes'] as List<dynamic>) : [];
+
+    int count = 0;
+    for (final classData in todaySchedule) {
+      final endStr = classData['end'] as String?;
+      if (endStr != null) {
+        final end = _parseTime(endStr);
+        if (end != null) {
+          final endDateTime = DateTime(now.year, now.month, now.day, end.hour, end.minute);
+          if (now.isBefore(endDateTime)) {
+            count++;
+          }
+        }
+      }
+    }
+    return count;
+  }
+
+  int getRemainingMinutes() {
+    final now = DateTime.now();
+    final today = _getTodayString(now);
+    final todayDay = widget.schedule.firstWhere(
+      (day) => day['name'] == today,
+      orElse: () => <String, dynamic>{},
+    );
+    final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty ? List<Map<String, dynamic>>.from(todayDay['classes'] as List<dynamic>) : [];
+
+    for (final classData in todaySchedule) {
+      final endStr = classData['end'] as String?;
+      if (endStr != null) {
+        final end = _parseTime(endStr);
+        if (end != null) {
+          final endDateTime = DateTime(now.year, now.month, now.day, end.hour, end.minute);
+          if (now.isBefore(endDateTime)) {
+            return endDateTime.difference(now).inMinutes;
+          }
+        }
+      }
+    }
+    return 0;
+  }
+
   void _changeDay(int newIndex) {
     _transitionController.animateTo(0.0, duration: const Duration(milliseconds: 150)).then((_) {
       setState(() {
@@ -623,12 +874,27 @@ class _SectographScheduleState extends State<SectographSchedule>
     });
   }
 
+  /// Interpolate between two DateTime values based on a morphAmount (0 to 1)
+  DateTime _interpolateTime(DateTime start, DateTime end, double amount) {
+    final startMinutes = start.hour * 60 + start.minute;
+    final endMinutes = end.hour * 60 + end.minute;
+    final interpolatedMinutes = startMinutes + (endMinutes - startMinutes) * amount;
+    
+    final hours = (interpolatedMinutes / 60).floor();
+    final minutes = (interpolatedMinutes % 60).floor();
+    
+    return DateTime(0, 1, 1, hours, minutes);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final classes = List<Map<String, dynamic>>.from(widget.schedule[_currentIndex]['classes'] as List<dynamic>);
+    final isToday = _currentIndex == _todayIndex;
+    final todayDay = widget.schedule.firstWhere((d) => d['name'] == _getTodayString(DateTime.now()), orElse: () => <String, dynamic>{});
+    final todayClasses = todayDay.isNotEmpty ? (todayDay['classes'] as List<dynamic>).cast<Map<String, dynamic>>() : <Map<String, dynamic>>[];
+    final displayClasses = _isOverview ? todayClasses : (widget.schedule[_currentIndex]['classes'] as List<dynamic>).cast<Map<String, dynamic>>();
     DateTime? minStart;
     DateTime? maxEnd;
-    for (final classData in classes) {
+    for (final classData in displayClasses) {
       final start = _parseTime(classData['start'] as String);
       final end = _parseTime(classData['end'] as String);
       if (start != null && end != null) {
@@ -636,45 +902,43 @@ class _SectographScheduleState extends State<SectographSchedule>
         if (maxEnd == null || end.isAfter(maxEnd)) maxEnd = end;
       }
     }
+    final displayCurrentClass = _isOverview ? _getCurrentClass(todayClasses, DateTime.now()) : (isToday ? _currentClass : null);
 
     return WearScaffold(
       body: Stack(
         children: [
           Positioned.fill(
             child: GestureDetector(
-              onHorizontalDragEnd: (details) {
-                if (details.primaryVelocity! > 0) {
-                  // Swipe right, previous day
-                  final newIndex = (_currentIndex - 1 + widget.schedule.length) % widget.schedule.length;
-                  _changeDay(newIndex);
-                } else if (details.primaryVelocity! < 0) {
-                  // Swipe left, next day
-                  final newIndex = (_currentIndex + 1) % widget.schedule.length;
-                  _changeDay(newIndex);
+              onDoubleTap: () {
+                setState(() {
+                  _isOverview = !_isOverview;
+                  if (_isOverview) {
+                    _overviewController.forward();
+                    _rotationController.forward();
+                  } else {
+                    _overviewController.reverse();
+                    _rotationController.reverse();
+                  }
+                });
+              },
+              onVerticalDragEnd: (details) {
+                if (details.primaryVelocity != null) {
+                  if (details.primaryVelocity! < -200) {
+                    // Swipe up
+                    final newIndex = (_currentIndex + 1) % widget.schedule.length;
+                    _changeDay(newIndex);
+                  } else if (details.primaryVelocity! > 200) {
+                    // Swipe down
+                    final newIndex = (_currentIndex - 1 + widget.schedule.length) % widget.schedule.length;
+                    _changeDay(newIndex);
+                  }
                 }
               },
-              onTap: () {
-                final day = widget.schedule[_currentIndex];
-                final dayName = day['name'] as String;
-                final isToday = _currentIndex == _todayIndex;
-
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (context) => TodayScheduleScreen(
-                      schedule: classes,
-                      title: isToday ? 'Today\'s Schedule' : '$dayName\'s Schedule',
-                      attendanceData: widget.attendanceData,
-                    ),
-                  ),
-                );
-              },
               onLongPress: () {
-                final day = widget.schedule[_currentIndex];
-
                 Navigator.of(context).push(
                   MaterialPageRoute(
                     builder: (context) => GradeBookScreen(
-                      schedule: classes,
+                      schedule: displayClasses,
                       attendanceData: widget.attendanceData,
                       classGrades: context.read<ScheduleProvider>().classGrades!,
                     ),
@@ -683,124 +947,220 @@ class _SectographScheduleState extends State<SectographSchedule>
               },
               child: Stack(
                 children: [
-                  // Circular schedule display
                   ScaleTransition(
-                    scale: _scaleAnimation,
-                    child: CustomPaint(
-                      size: Size.infinite,
-                      painter: DaySchedulePainter(
-                        classes: classes,
-                        currentClass: _currentIndex == _todayIndex ? _currentClass : null,
-                        minStart: minStart,
-                        maxEnd: maxEnd,
-                      ),
+                    scale: _overviewScale,
+                    child: Stack(
+                      children: [
+                        // Circular schedule display with morphing transition
+                        AnimatedBuilder(
+                          animation: _rotationAnimation,
+                          builder: (context, child) {
+                            // Interpolate between school hours and 24-hour view
+                            final t = _rotationAnimation.value;
+                            final morphedMinStart = _interpolateTime(
+                              minStart ?? DateTime(0, 1, 1, 8, 0),
+                              DateTime(0, 1, 1, 0, 0),
+                              t,
+                            );
+                            final morphedMaxEnd = _interpolateTime(
+                              maxEnd ?? DateTime(0, 1, 1, 16, 0),
+                              DateTime(0, 1, 1, 23, 59),
+                              t,
+                            );
+
+                            return Transform.rotate(
+                              angle: t * (pi / 8), // Smooth rotation during morph
+                              child: ScaleTransition(
+                                scale: _scaleAnimation,
+                                child: CustomPaint(
+                                  size: Size.infinite,
+                                  painter: DaySchedulePainter(
+                                    classes: displayClasses,
+                                    currentClass: displayCurrentClass,
+                                    minStart: morphedMinStart,
+                                    maxEnd: morphedMaxEnd,
+                                    is24Hour: _isOverview,
+                                    morphAmount: t,
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+
+                        // Current time indicator with morphing transition
+                        if (isToday || _isOverview)
+                          AnimatedBuilder(
+                            animation: _rotationAnimation,
+                            builder: (context, child) {
+                              final t = _rotationAnimation.value;
+                              final morphedMinStart = _interpolateTime(
+                                minStart ?? DateTime(0, 1, 1, 8, 0),
+                                DateTime(0, 1, 1, 0, 0),
+                                t,
+                              );
+                              final morphedMaxEnd = _interpolateTime(
+                                maxEnd ?? DateTime(0, 1, 1, 16, 0),
+                                DateTime(0, 1, 1, 23, 59),
+                                t,
+                              );
+
+                              return Transform.rotate(
+                                angle: t * (pi / 8),
+                                child: ScaleTransition(
+                                  scale: _scaleAnimation,
+                                  child: CustomPaint(
+                                    size: Size.infinite,
+                                    painter: TimeIndicatorPainter(
+                                      minStart: morphedMinStart,
+                                      maxEnd: morphedMaxEnd,
+                                      is24Hour: _isOverview,
+                                      morphAmount: t,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+
+                        // Center display
+                        Center(
+                          child: FadeTransition(
+                            opacity: _titleFadeAnimation,
+                            child: FadeTransition(
+                              opacity: _overviewFade,
+                              child: _currentIndex == _todayIndex
+                                  ? Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (_currentClass != null) ...[
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                            decoration: BoxDecoration(
+                                              color: Colors.blue.withOpacity(0.5),
+                                              borderRadius: BorderRadius.circular(16),
+                                              border: Border.all(color: Colors.blue.withOpacity(0.5)),
+                                            ),
+                                            child: Column(
+                                              children: [
+                                                Text(
+                                                  _currentClass!['name'] ?? 'Unknown',
+                                                  style: const TextStyle(
+                                                    color: Colors.white,
+                                                    fontSize: 12,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                  textAlign: TextAlign.center,
+                                                ),
+                                                Text(
+                                                  _currentClass!['room'] ?? 'N/A',
+                                                  style: const TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 10,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ] else ...[
+                                          Column(
+                                            children: [
+                                              Text(
+                                                widget.schedule[_currentIndex]['name'] as String,
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 28,
+                                                  fontWeight: FontWeight.bold
+                                                )
+                                              ),
+                                              Text(
+                                                "Today",
+                                                style: const TextStyle(
+                                                    color: Colors.white,
+                                                    fontSize: 12,
+                                                    fontWeight: FontWeight.w300
+                                                )
+                                              )
+                                            ]
+                                          )
+                                        ]
+                                      ],
+                                    )
+                                  : Text(
+                                      widget.schedule[_currentIndex]['name'] as String,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 28,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-
-                  // Current time indicator (only for today)
-                  if (_currentIndex == _todayIndex)
-                    ScaleTransition(
-                      scale: _scaleAnimation,
-                      child: CustomPaint(
-                        size: Size.infinite,
-                        painter: TimeIndicatorPainter(
-                          minStart: minStart,
-                          maxEnd: maxEnd,
+                  // Time display at bottom
+                  Positioned(
+                    bottom: 2,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: Text(
+                        DateFormat.jm().format(DateTime.now()),
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w400,
                         ),
                       ),
                     ),
-
-                  // Center display
-                  Center(
-                    child: FadeTransition(
-                      opacity: _titleFadeAnimation,
-                      child: _currentIndex == _todayIndex
-                          ? Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (_currentClass != null) ...[
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                    decoration: BoxDecoration(
-                                      color: Colors.blue.withOpacity(0.5),
-                                      borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(color: Colors.blue.withOpacity(0.5)),
-                                    ),
-                                    child: Column(
-                                      children: [
-                                        Text(
-                                          _currentClass!['name'] ?? 'Unknown',
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                          textAlign: TextAlign.center,
-                                        ),
-                                        Text(
-                                          _currentClass!['room'] ?? 'N/A',
-                                          style: const TextStyle(
-                                            color: Colors.white70,
-                                            fontSize: 10,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ] else ...[
-                                  Column(
-                                    children: [
-                                      Text(
-                                        widget.schedule[_currentIndex]['name'] as String,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 28,
-                                          fontWeight: FontWeight.bold
-                                        )
-                                      ),
-                                      Text(
-                                        "Today",
-                                        style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w300
-                                        )
-                                      )
-                                    ]
-                                  )
-                                ]
-                              ],
-                            )
-                          : Text(
-                              widget.schedule[_currentIndex]['name'] as String,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 28,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                    ),
                   ),
+                  // Arc texts for overview
+                  if (_isOverview) ...[
+                    Positioned(
+                      top: 15,
+                      left: 0,
+                      right: 0,
+                      height: 80,
+                      child: Text(
+                        'Classes: ${getRemainingClassesCount()}',
+                        style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w900, fontFamily: 'RobotoMono'),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                    Positioned(
+                      bottom: -42,
+                      left: 0,
+                      right: 0,
+                      height: 80,
+                      child: Text(
+                        '${getRemainingMinutes()}m',
+                        style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w900, fontFamily: 'RobotoFlex'),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
           ),
-          // Time display at bottom
-          Positioned(
-            bottom: 2,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: Text(
-                DateFormat.jm().format(DateTime.now()),
-                style: const TextStyle(
-                  color: Colors.white70,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w400,
+          if (!_isOverview)
+            Positioned(
+              bottom: 2,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Text(
+                  DateFormat.jm().format(DateTime.now()),
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w400,
+                  ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -821,6 +1181,8 @@ class _SectographScheduleState extends State<SectographSchedule>
   void dispose() {
     _animationController.dispose();
     _transitionController.dispose();
+    _overviewController.dispose();
+    _rotationController.dispose();
     super.dispose();
   }
 }
@@ -830,13 +1192,17 @@ class DaySchedulePainter extends CustomPainter {
   final Map<String, dynamic>? currentClass;
   final DateTime? minStart;
   final DateTime? maxEnd;
+  final bool is24Hour;
+  final double morphAmount;
 
-  DaySchedulePainter({required this.classes, this.currentClass, this.minStart, this.maxEnd});
-
-  String _getTodayString(DateTime now) {
-    const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-    return days[now.weekday - 1];
-  }
+  DaySchedulePainter({
+    required this.classes,
+    this.currentClass,
+    this.minStart,
+    this.maxEnd,
+    this.is24Hour = false,
+    this.morphAmount = 0.0,
+  });
 
   DateTime? _parseTime(String timeStr) {
     final regex = RegExp(r'(\d{1,2}):(\d{2})\s*(AM|PM)');
@@ -862,6 +1228,39 @@ class DaySchedulePainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2;
     canvas.drawCircle(center, radius, bgPaint);
+
+    // Draw hour markers for 24-hour view
+    if (is24Hour) {
+      final totalMinutes = 24 * 60.0;
+      for (int hour = 0; hour < 24; hour++) {
+        final hourMinutes = hour * 60.0;
+        final angle = (hourMinutes / totalMinutes) * 2 * pi - pi / 2;
+        final isMajor = hour % 3 == 0;
+        final innerRadius = isMajor ? radius - 20 : radius - 10;
+        final start = Offset(center.dx + innerRadius * cos(angle), center.dy + innerRadius * sin(angle));
+        final end = Offset(center.dx + radius * cos(angle), center.dy + radius * sin(angle));
+        final markerPaint = Paint()
+          ..color = Colors.white.withOpacity(isMajor ? 0.8 : 0.5)
+          ..strokeWidth = isMajor ? 2 : 1;
+        canvas.drawLine(start, end, markerPaint);
+
+        if (isMajor) {
+          final textRadius = innerRadius - 15;
+          final textX = center.dx + textRadius * cos(angle);
+          final textY = center.dy + textRadius * sin(angle);
+          final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+          final textPainter = TextPainter(
+            text: TextSpan(
+              text: displayHour.toString(),
+              style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+            ),
+            textDirection: TextDirection.ltr,
+          );
+          textPainter.layout();
+          textPainter.paint(canvas, Offset(textX - textPainter.width / 2, textY - textPainter.height / 2));
+        }
+      }
+    }
 
     if (classes.isEmpty) return;
 
@@ -999,8 +1398,15 @@ class DaySchedulePainter extends CustomPainter {
 class TimeIndicatorPainter extends CustomPainter {
   final DateTime? minStart;
   final DateTime? maxEnd;
+  final bool is24Hour;
+  final double morphAmount;
 
-  TimeIndicatorPainter({this.minStart, this.maxEnd});
+  TimeIndicatorPainter({
+    this.minStart,
+    this.maxEnd,
+    this.is24Hour = false,
+    this.morphAmount = 0.0,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1017,39 +1423,80 @@ class TimeIndicatorPainter extends CustomPainter {
 
     if (currentMinutes < 0 || currentMinutes > totalMinutes) return; // Don't draw if outside school day
 
-    // Calculate angle based on current time within school day
-    final angle = (currentMinutes / totalMinutes) * 2 * pi - pi / 2;
     final radius = size.width / 2 - 20; // Match the sector radius
-    final centerCircleRadius = 40.0;
 
-    final endPoint = Offset(
-      center.dx + radius * cos(angle),
-      center.dy + radius * sin(angle),
+    // Interpolate between 12-hour and 24-hour clock display
+    final useHourlyScale = morphAmount > 0.5; // Switch at 50% morph
+    
+    // Draw hour hand (shorter, thicker) - morphs between 12-hour and 24-hour
+    final hourAngle = useHourlyScale
+        ? ((currentTime.hour + currentTime.minute / 60) / 24) * 2 * pi - pi / 2 // 24-hour
+        : (((currentTime.hour % 12) + currentTime.minute / 60) * (pi / 6) - pi / 2); // 12-hour
+    
+    final hourRadius = radius * (0.6 - morphAmount * 0.1); // Shrink slightly during morph
+    final hourEndPoint = Offset(
+      center.dx + hourRadius * cos(hourAngle),
+      center.dy + hourRadius * sin(hourAngle),
     );
 
-    // Start point from edge of center circle
-    final startPoint = Offset(
-      center.dx + centerCircleRadius * cos(angle),
-      center.dy + centerCircleRadius * sin(angle),
+    final hourHandPaint = Paint()
+      ..color = Colors.white.withOpacity(0.8 - morphAmount * 0.2)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round;
+
+    canvas.drawLine(center, hourEndPoint, hourHandPaint);
+
+    // Draw minute hand (longer, thinner)
+    final minuteAngle = (currentTime.minute + currentTime.second / 60) * (pi / 30) - pi / 2;
+    final minuteRadius = radius * (0.85 - morphAmount * 0.05);
+    final minuteEndPoint = Offset(
+      center.dx + minuteRadius * cos(minuteAngle),
+      center.dy + minuteRadius * sin(minuteAngle),
     );
 
-    // Draw hand shadow first
-    final shadowPaint = Paint()
-      ..color = Colors.black.withOpacity(0.5)
+    final minuteHandPaint = Paint()
+      ..color = Colors.white.withOpacity(0.9 - morphAmount * 0.3)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 6
+      ..strokeWidth = 2
       ..strokeCap = StrokeCap.round;
 
-    canvas.drawLine(startPoint, endPoint, shadowPaint);
+    canvas.drawLine(center, minuteEndPoint, minuteHandPaint);
 
-    // Draw the clock hand as a line
-    final handPaint = Paint()
-      ..color = Colors.white
+    // Draw second hand (thin, colored) - fade out during morph to 24-hour
+    if (!is24Hour && morphAmount < 0.5) {
+      final secondHandAlpha = (1.0 - (morphAmount * 2)) * 0.7;
+      final secondAngle = (currentTime.second + currentTime.millisecond / 1000) * (pi / 30) - pi / 2;
+      final secondRadius = radius * 0.9;
+      final secondEndPoint = Offset(
+        center.dx + secondRadius * cos(secondAngle),
+        center.dy + secondRadius * sin(secondAngle),
+      );
+
+      final secondHandPaint = Paint()
+        ..color = Colors.blue.withOpacity(secondHandAlpha)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1
+        ..strokeCap = StrokeCap.round;
+
+      canvas.drawLine(center, secondEndPoint, secondHandPaint);
+    }
+
+    // Draw center circle/hub - scale up during morph
+    final hubRadius = 6.0 + morphAmount * 3;
+    final hubOutlineRadius = 8.0 + morphAmount * 4;
+    
+    final hubPaint = Paint()
+      ..color = Colors.white.withOpacity(0.9 - morphAmount * 0.2)
+      ..style = PaintingStyle.fill;
+    
+    final hubOutlinesPaint = Paint()
+      ..color = Colors.blue.withOpacity(0.5 + morphAmount * 0.3)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 3
-      ..strokeCap = StrokeCap.round;
+      ..strokeWidth = 2;
 
-    canvas.drawLine(startPoint, endPoint, handPaint);
+    canvas.drawCircle(center, hubRadius, hubPaint);
+    canvas.drawCircle(center, hubOutlineRadius, hubOutlinesPaint);
   }
 
   @override
@@ -1260,26 +1707,6 @@ class TodayScheduleScreen extends StatelessWidget {
     return false;
   }
 
-  List<DateTime>? _parseTimeRange(String timeStr) {
-    final parts = timeStr.split(' - ');
-    if (parts.length == 2) {
-      try {
-        final start = _parseTime(parts[0]);
-        final end = _parseTime(parts[1]);
-        if (start != null && end != null) {
-          final now = DateTime.now();
-          return [
-            DateTime(now.year, now.month, now.day, start.hour, start.minute),
-            DateTime(now.year, now.month, now.day, end.hour, end.minute),
-          ];
-        }
-      } catch (e) {
-        // Ignore parsing errors
-      }
-    }
-    return null;
-  }
-
   DateTime? _parseTime(String timeStr) {
     final regex = RegExp(r'(\d{1,2}):(\d{2})\s*(AM|PM)');
     final match = regex.firstMatch(timeStr.trim());
@@ -1314,9 +1741,33 @@ class GradeBookScreen extends StatelessWidget {
             )
           : ListView.builder(
               padding: const EdgeInsets.all(12),
-              itemCount: schedule.length,
+              itemCount: schedule.length + 1,
               itemBuilder: (context, index) {
-                final classData = schedule[index];
+                if (index == 0) {
+                  final gpa = context.read<ScheduleProvider>().gpa;
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    color: Theme.of(context).cardTheme.color,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Center(
+                        child: Text(
+                          'GPA: ${gpa.toStringAsFixed(2)}',
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }
+                final classIndex = index - 1;
+                final classData = schedule[classIndex];
                 final className = classData['name'] as String? ?? 'Unknown';
                 final room = classData['room'] as String? ?? 'N/A';
                 final teacher = classData['teacher'] as String? ?? 'N/A';
