@@ -276,6 +276,14 @@ class ScheduleProvider extends ChangeNotifier {
   String? get error => _error;
 
   double get gpa {
+    // Use GPA from attendanceData (API) if available
+    if (_attendanceData != null && _attendanceData!.containsKey('gpa')) {
+      final apiGpa = _attendanceData!['gpa'];
+      if (apiGpa is num) {
+        return apiGpa.toDouble();
+      }
+    }
+    // Fallback to calculated GPA from class grades
     if (_classGrades == null || !_classGrades!.containsKey('classes'))
       return 0.0;
     final classes = _classGrades!['classes'] as Map<String, dynamic>;
@@ -1887,7 +1895,9 @@ class TimeIndicatorPainter extends CustomPainter {
       final now = DateTime.now();
 
       // Draw hour hand
-      final hourAngle = (now.hour % 12 + now.minute / 60.0) * 30 * pi / 180 - pi / 2;
+      final hourAngle = is24Hour
+          ? (now.hour + now.minute / 60.0) * 15 * pi / 180 - pi / 2
+          : (now.hour % 12 + now.minute / 60.0) * 30 * pi / 180 - pi / 2;
       final hourHandLength = radius * 0.5;
       final hourHandEnd = Offset(
         center.dx + hourHandLength * cos(hourAngle),
