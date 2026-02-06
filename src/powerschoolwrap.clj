@@ -147,8 +147,14 @@
             [:p "Class grades fetch failed: " (:error result)]])]
         [:p [:a {:href "/"} "Back to test form"]]])))
   (POST "/authenticate" [username password ps-base]
-    (let [cookies (auth/authenticate-user username password ps-base)]
-      (response/response (json/generate-string cookies))))
+    (try
+      (let [cookies (auth/authenticate-user username password ps-base)]
+        (response/response (json/generate-string cookies)))
+      (catch Exception e
+        (let [msg (.getMessage e)]
+          (if (clojure.string/includes? msg "Invalid username or password")
+            (response/status 401 (json/generate-string {:error "Invalid username or password"}))
+            (response/status 500 (json/generate-string {:error msg})))))))
   (POST "/schedule" [cookies-json ps-base]
     (let [cookies (json/parse-string cookies-json)
           schedule-data (schedule/fetch-schedule cookies ps-base)]

@@ -4,9 +4,9 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import 'dart:math';
-import 'package:flutter/services.dart';
 import 'dart:async';
 import 'package:intl/intl.dart' hide TextDirection;
+import 'package:flutter/services.dart';
 
 import 'dart:math' as math;
 
@@ -144,12 +144,24 @@ class _ArcTextPainter extends CustomPainter {
 }
 
 void main() {
-  runApp(
-    ChangeNotifierProvider(
-      create: (context) => ScheduleProvider(),
-      child: const MyApp(),
-    ),
-  );
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.dumpErrorToConsole(details);
+    // You can also send the error to a logging service here
+  };
+
+  runZonedGuarded(() {
+    runApp(
+      ChangeNotifierProvider(
+        create: (context) => ScheduleProvider(),
+        child: const MyApp(),
+      ),
+    );
+  }, (Object error, StackTrace stack) {
+    // Handle uncaught errors
+    debugPrint('Uncaught error: $error');
+    debugPrint('Stack trace: $stack');
+    // You can log to a file or send to a service
+  });
 }
 
 class MyApp extends StatelessWidget {
@@ -166,7 +178,6 @@ class MyApp extends StatelessWidget {
               brightness: Brightness.dark,
             ).copyWith(
               surface: const Color(0xFF1E1E1E),
-              background: const Color(0xFF121212),
             ),
         useMaterial3: true,
         cardTheme: CardThemeData(
@@ -219,30 +230,14 @@ class _AuthCheckScreenState extends State<AuthCheckScreen> {
 
   Future<void> _checkCredentials() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final username = prefs.getString('username');
-      final password = prefs.getString('password');
-
-      // Wait for next frame to ensure widget is built
+      // Always navigate to ScheduleScreen - it can work offline
       await Future.delayed(const Duration(milliseconds: 100));
 
       if (!mounted) return;
 
-      // Check if credentials exist and are not empty after trimming
-      final hasValidCredentials = username != null &&
-          password != null &&
-          username.trim().isNotEmpty &&
-          password.trim().isNotEmpty;
-
-      if (hasValidCredentials) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (context) => const ScheduleScreen()),
-        );
-      } else {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (context) => const SettingsScreen()),
-        );
-      }
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (context) => const ScheduleScreen()),
+      );
     } catch (e) {
       // If any error occurs, go to settings screen
       if (mounted) {
@@ -284,8 +279,11 @@ class ScheduleProvider extends ChangeNotifier {
       }
     }
     // Fallback to calculated GPA from class grades
-    if (_classGrades == null || !_classGrades!.containsKey('classes'))
+    if (_classGrades == null ||
+        !_classGrades!.containsKey('classes') ||
+        _classGrades!['classes'] is! Map) {
       return 0.0;
+    }
     final classes = _classGrades!['classes'] as Map<String, dynamic>;
     double totalPoints = 0.0;
     int count = 0;
@@ -352,6 +350,17 @@ class ScheduleProvider extends ChangeNotifier {
       notifyListeners();
     }
 
+    // Check if network sync is enabled
+    final prefs = await SharedPreferences.getInstance();
+    final enableNetworkSync = prefs.getBool('enable_network_sync') ?? false;
+    
+    if (!enableNetworkSync) {
+      // Skip network loading if disabled
+      _isLoading = false;
+      notifyListeners();
+      return;
+    }
+
     // Then load from network in background
     _loadFromNetwork();
   }
@@ -364,7 +373,10 @@ class ScheduleProvider extends ChangeNotifier {
 
     if (scheduleJson != null) {
       try {
-        _schedule = List<Map<String, dynamic>>.from(json.decode(scheduleJson));
+        final decoded = json.decode(scheduleJson);
+        if (decoded is List) {
+          _schedule = List<Map<String, dynamic>>.from(decoded);
+        }
       } catch (e) {
         // Ignore invalid cache
       }
@@ -372,7 +384,10 @@ class ScheduleProvider extends ChangeNotifier {
 
     if (attendanceJson != null) {
       try {
-        _attendanceData = json.decode(attendanceJson);
+        final decoded = json.decode(attendanceJson);
+        if (decoded is Map) {
+          _attendanceData = decoded as Map<String, dynamic>;
+        }
       } catch (e) {
         // Ignore
       }
@@ -380,7 +395,10 @@ class ScheduleProvider extends ChangeNotifier {
 
     if (gradesJson != null) {
       try {
-        _classGrades = json.decode(gradesJson);
+        final decoded = json.decode(gradesJson);
+        if (decoded is Map) {
+          _classGrades = decoded as Map<String, dynamic>;
+        }
       } catch (e) {
         // Ignore
       }
@@ -415,15 +433,16 @@ class ScheduleProvider extends ChangeNotifier {
         final prefs = await SharedPreferences.getInstance();
         final username = prefs.getString('username')?.trim();
         final password = prefs.getString('password')?.trim();
-        final psBase = prefs.getString('ps_base')?.trim() ?? 'holyghostprep';
-        final apiUrl =
-            prefs.getString('api_url')?.trim() ?? 'http://192.168.1.100:3000';
+        final psBase = prefs.getString('ps_base')?.trim() ?? '';
+        final apiUrl = prefs.getString('api_url')?.trim() ?? '';
 
         if (username == null ||
             password == null ||
             username.isEmpty ||
-            password.isEmpty) {
-          _error = 'Please set credentials in settings';
+            password.isEmpty ||
+            psBase.isEmpty ||
+            apiUrl.isEmpty) {
+          _error = 'Please set credentials and server settings in settings';
           _isLoading = false;
           notifyListeners();
           return;
@@ -437,10 +456,16 @@ class ScheduleProvider extends ChangeNotifier {
         ).timeout(const Duration(seconds: 30));
 
         if (authResponse.statusCode != 200) {
-          if (authResponse.statusCode == 401 || authResponse.statusCode == 403) {
-            throw Exception('Invalid credentials. Please check your username and password.');
+          String errorMessage = 'Authentication failed with status ${authResponse.statusCode}';
+          try {
+            final errorJson = json.decode(utf8.decode(authResponse.bodyBytes));
+            if (errorJson is Map && errorJson.containsKey('error')) {
+              errorMessage = errorJson['error'];
+            }
+          } catch (e) {
+            // ignore
           }
-          throw Exception('Authentication failed with status ${authResponse.statusCode}');
+          throw Exception(errorMessage);
         }
 
         final cookies = json.decode(utf8.decode(authResponse.bodyBytes));
@@ -465,26 +490,43 @@ class ScheduleProvider extends ChangeNotifier {
         final responses = await Future.wait([scheduleFuture, gradesFuture, classGradesFuture]);
 
         if (responses[0].statusCode == 200) {
-          _schedule = List<Map<String, dynamic>>.from(
-            json.decode(utf8.decode(responses[0].bodyBytes)),
-          );
-          // Cache it
-          await prefs.setString('cached_schedule', json.encode(_schedule));
+          try {
+            final decoded = json.decode(utf8.decode(responses[0].bodyBytes));
+            if (decoded is List) {
+              _schedule = List<Map<String, dynamic>>.from(decoded);
+              // Cache it
+              await prefs.setString('cached_schedule', json.encode(_schedule));
+            }
+          } catch (e) {
+            // Ignore invalid response
+          }
         }
 
         if (responses[1].statusCode == 200) {
-          _attendanceData = json.decode(utf8.decode(responses[1].bodyBytes));
-          await prefs.setString(
-            'cached_attendance',
-            json.encode(_attendanceData),
-          );
+          try {
+            final decoded = json.decode(utf8.decode(responses[1].bodyBytes));
+            if (decoded is Map) {
+              _attendanceData = decoded as Map<String, dynamic>;
+              await prefs.setString(
+                'cached_attendance',
+                json.encode(_attendanceData),
+              );
+            }
+          } catch (e) {
+            // Ignore
+          }
         }
 
         if (responses[2].statusCode == 200) {
-          _classGrades = json.decode(
-            utf8.decode(responses[2].bodyBytes),
-          );
-          await prefs.setString('cached_grades', json.encode(_classGrades));
+          try {
+            final decoded = json.decode(utf8.decode(responses[2].bodyBytes));
+            if (decoded is Map) {
+              _classGrades = decoded as Map<String, dynamic>;
+              await prefs.setString('cached_grades', json.encode(_classGrades));
+            }
+          } catch (e) {
+            // Ignore
+          }
         }
 
         // Success
@@ -494,8 +536,10 @@ class ScheduleProvider extends ChangeNotifier {
       } catch (e) {
         retryCount++;
         if (retryCount >= maxRetries) {
-          _error =
-              'Failed to load schedule after $maxRetries attempts: ${e.toString()}';
+          if (_schedule.isEmpty) {
+            _error =
+                'Failed to load schedule after $maxRetries attempts: ${e.toString()}';
+          }
           _isLoading = false;
           notifyListeners();
           return;
@@ -628,10 +672,9 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
-  final _psBaseController = TextEditingController(text: 'holyghostprep');
-  final _apiUrlController = TextEditingController(
-    text: 'http://192.168.1.100:3000',
-  );
+  final _psBaseController = TextEditingController(text: '');
+  final _apiUrlController = TextEditingController(text: '');
+  bool _enableNetworkSync = false;
 
   @override
   void initState() {
@@ -646,8 +689,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         setState(() {
           _usernameController.text = prefs.getString('username')?.trim() ?? '';
           _passwordController.text = prefs.getString('password')?.trim() ?? '';
-          _psBaseController.text = prefs.getString('ps_base')?.trim() ?? 'holyghostprep';
-          _apiUrlController.text = prefs.getString('api_url')?.trim() ?? 'http://192.168.1.100:3000';
+          _psBaseController.text = prefs.getString('ps_base')?.trim() ?? '';
+          _apiUrlController.text = prefs.getString('api_url')?.trim() ?? '';
+          _enableNetworkSync = prefs.getBool('enable_network_sync') ?? false;
         });
       }
     } catch (e) {
@@ -661,11 +705,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final psBase = _psBaseController.text.trim();
     final apiUrl = _apiUrlController.text.trim();
 
-    if (username.isEmpty || password.isEmpty) {
+    if (username.isEmpty || password.isEmpty || psBase.isEmpty || apiUrl.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Username and password are required'),
+            content: Text('Username, password, PowerSchool Base, and API URL are required'),
             backgroundColor: Colors.red,
           ),
         );
@@ -677,11 +721,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('username', username);
       await prefs.setString('password', password);
-      await prefs.setString('ps_base', psBase.isEmpty ? 'holyghostprep' : psBase);
-      await prefs.setString(
-        'api_url',
-        apiUrl.isEmpty ? 'http://192.168.1.100:3000' : apiUrl,
-      );
+      await prefs.setString('ps_base', psBase);
+      await prefs.setString('api_url', apiUrl);
+      await prefs.setBool('enable_network_sync', _enableNetworkSync);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -774,7 +816,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               style: const TextStyle(color: Colors.white),
             ),
-            const SizedBox(height: 40),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Checkbox(
+                  value: _enableNetworkSync,
+                  onChanged: (value) {
+                    setState(() {
+                      _enableNetworkSync = value ?? false;
+                    });
+                  },
+                  fillColor: WidgetStateProperty.resolveWith<Color>(
+                    (Set<WidgetState> states) {
+                      if (states.contains(WidgetState.selected)) {
+                        return Colors.blue;
+                      }
+                      return Colors.white24;
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'Enable Network Sync',
+                    style: TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+                ),
+              ],
+            ),
             ElevatedButton(
               onPressed: _saveSettings,
               style: ElevatedButton.styleFrom(
@@ -784,7 +853,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
               child: const Text(
-                'Login & Sync',
+                'Save Settings',
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
             ),
@@ -847,6 +916,7 @@ class _SectographScheduleState extends State<SectographSchedule>
 
   // Timer references for cleanup
   Timer? _classUpdateTimer;
+  Timer? _clockTimer;
 
   @override
   void initState() {
@@ -889,15 +959,20 @@ class _SectographScheduleState extends State<SectographSchedule>
     _updateTodayIndex();
     _transitionController.value = 1.0;
     _titleScaleController.value = 1.0;
-    
-    // Initialize cache immediately - don't defer it
+
     _updateCachedDisplayData();
     _updateCurrentClass();
-    
-    // Update current class every 5 minutes to reduce overhead
-    _classUpdateTimer = Timer.periodic(const Duration(minutes: 5), (timer) {
+
+    _classUpdateTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
       if (mounted) {
         _updateCurrentClass();
+      }
+    });
+
+    // Enforce rerendering of clock per-second. Please Flutter, re-render this clock.
+    _clockTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() {});
       }
     });
   }
@@ -928,8 +1003,11 @@ class _SectographScheduleState extends State<SectographSchedule>
         (day) => day['name'] == today,
         orElse: () => <String, dynamic>{},
       );
-      final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty
-          ? List<Map<String, dynamic>>.from(todayDay['classes'] as List<dynamic>)
+      final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty &&
+              todayDay['classes'] is List
+          ? List<Map<String, dynamic>>.from(
+              todayDay['classes'] as List<dynamic>,
+            )
           : [];
 
       _currentClass = _getCurrentClass(todaySchedule, now);
@@ -940,6 +1018,7 @@ class _SectographScheduleState extends State<SectographSchedule>
   }
 
   Future<void> _saveCurrentClass() async {
+    print('Saving current class');
     if (!mounted) return;
 
     final prefs = await SharedPreferences.getInstance();
@@ -973,13 +1052,13 @@ class _SectographScheduleState extends State<SectographSchedule>
           final minutesRemaining = endDateTime.difference(now).inMinutes;
           final totalMinutes = endDateTime.difference(startDateTime).inMinutes;
           await prefs.setInt(
-            'class_ends_in',
+            'minutes_remaining',
             minutesRemaining.clamp(0, 1440),
-          ); // Clamp to reasonable range
+          );
           await prefs.setInt(
-            'class_total_duration',
+            'total_minutes',
             totalMinutes.clamp(0, 1440),
-          ); // Clamp to reasonable range
+          );
         }
       }
       await prefs.remove('next_class_name');
@@ -988,7 +1067,8 @@ class _SectographScheduleState extends State<SectographSchedule>
       // No active class - find next class
       await prefs.setString('class_name', '');
       await prefs.setString('room', '');
-      await prefs.remove('class_ends_in');
+      await prefs.remove('minutes_remaining');
+      await prefs.remove('total_minutes');
 
       // Only try to find next class if we have schedule data
       if (widget.schedule.isNotEmpty) {
@@ -998,7 +1078,8 @@ class _SectographScheduleState extends State<SectographSchedule>
           (day) => day['name'] == today,
           orElse: () => <String, dynamic>{},
         );
-        final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty
+        final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty &&
+                todayDay['classes'] is List
             ? List<Map<String, dynamic>>.from(
                 todayDay['classes'] as List<dynamic>,
               )
@@ -1044,6 +1125,21 @@ class _SectographScheduleState extends State<SectographSchedule>
         await prefs.remove('next_class_name');
         await prefs.remove('next_class_starts_in');
       }
+    }
+    
+    // Request complication update
+    _requestComplicationUpdate();
+  }
+  
+  void _requestComplicationUpdate() async {
+    print('Requesting complication update');
+    try {
+      const platform = MethodChannel('cc.hellings.ps/complication');
+      final result = await platform.invokeMethod('requestUpdate');
+      print('Complication update requested, result: $result');
+    } catch (e) {
+      print('Failed to request complication update: $e');
+      // Silently fail if complication update fails
     }
   }
 
@@ -1103,25 +1199,28 @@ class _SectographScheduleState extends State<SectographSchedule>
       (day) => day['name'] == today,
       orElse: () => <String, dynamic>{},
     );
-    final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty
+    final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty &&
+            todayDay['classes'] is List
         ? List<Map<String, dynamic>>.from(todayDay['classes'] as List<dynamic>)
         : [];
 
     int count = 0;
     for (final classData in todaySchedule) {
-      final endStr = classData['end'] as String?;
-      if (endStr != null) {
-        final end = _parseTime(endStr);
-        if (end != null) {
-          final endDateTime = DateTime(
-            now.year,
-            now.month,
-            now.day,
-            end.hour,
-            end.minute,
-          );
-          if (now.isBefore(endDateTime)) {
-            count++;
+      if (classData is Map<String, dynamic>) {
+        final endStr = classData['end'] as String?;
+        if (endStr != null) {
+          final end = _parseTime(endStr);
+          if (end != null) {
+            final endDateTime = DateTime(
+              now.year,
+              now.month,
+              now.day,
+              end.hour,
+              end.minute,
+            );
+            if (now.isBefore(endDateTime)) {
+              count++;
+            }
           }
         }
       }
@@ -1136,24 +1235,27 @@ class _SectographScheduleState extends State<SectographSchedule>
       (day) => day['name'] == today,
       orElse: () => <String, dynamic>{},
     );
-    final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty
+    final List<Map<String, dynamic>> todaySchedule = todayDay.isNotEmpty &&
+            todayDay['classes'] is List
         ? List<Map<String, dynamic>>.from(todayDay['classes'] as List<dynamic>)
         : [];
 
     for (final classData in todaySchedule) {
-      final endStr = classData['end'] as String?;
-      if (endStr != null) {
-        final end = _parseTime(endStr);
-        if (end != null) {
-          final endDateTime = DateTime(
-            now.year,
-            now.month,
-            now.day,
-            end.hour,
-            end.minute,
-          );
-          if (now.isBefore(endDateTime)) {
-            return endDateTime.difference(now).inMinutes;
+      if (classData is Map<String, dynamic>) {
+        final endStr = classData['end'] as String?;
+        if (endStr != null) {
+          final end = _parseTime(endStr);
+          if (end != null) {
+            final endDateTime = DateTime(
+              now.year,
+              now.month,
+              now.day,
+              end.hour,
+              end.minute,
+            );
+            if (now.isBefore(endDateTime)) {
+              return endDateTime.difference(now).inMinutes;
+            }
           }
         }
       }
@@ -1227,13 +1329,15 @@ class _SectographScheduleState extends State<SectographSchedule>
     _cachedDisplayClasses = _isOverview
         ? (_currentIndex >= 0 &&
                   _currentIndex < widget.schedule.length &&
-                  widget.schedule[_currentIndex]['classes'] != null
+                  widget.schedule[_currentIndex]['classes'] != null &&
+                  widget.schedule[_currentIndex]['classes'] is List
               ? (widget.schedule[_currentIndex]['classes'] as List<dynamic>)
                     .cast<Map<String, dynamic>>()
               : <Map<String, dynamic>>[])
         : (_currentIndex >= 0 &&
                   _currentIndex < widget.schedule.length &&
-                  widget.schedule[_currentIndex]['classes'] != null
+                  widget.schedule[_currentIndex]['classes'] != null &&
+                  widget.schedule[_currentIndex]['classes'] is List
               ? (widget.schedule[_currentIndex]['classes'] as List<dynamic>)
                     .cast<Map<String, dynamic>>()
               : <Map<String, dynamic>>[]);
@@ -1283,6 +1387,7 @@ class _SectographScheduleState extends State<SectographSchedule>
   @override
   void dispose() {
     _classUpdateTimer?.cancel();
+    _clockTimer?.cancel();
     _animationController.dispose();
     _transitionController.dispose();
     _titleScaleController.dispose();
@@ -1746,6 +1851,7 @@ class DaySchedulePainter extends CustomPainter {
     final classTextPainter = TextPainter(textDirection: TextDirection.ltr);
 
     for (final classData in sortedClasses) {
+      if (classData is! Map<String, dynamic>) continue;
       final startStr = classData['start'] as String?;
       final endStr = classData['end'] as String?;
       if (startStr == null || endStr == null) continue;

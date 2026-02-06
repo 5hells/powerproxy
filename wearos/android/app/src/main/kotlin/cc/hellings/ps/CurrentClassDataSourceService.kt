@@ -1,114 +1,120 @@
 package cc.hellings.ps
 
-import android.app.PendingIntent
 import android.content.ComponentName
-import android.content.Context
-import android.content.Intent
-import androidx.wear.watchface.complications.data.ComplicationData
-import androidx.wear.watchface.complications.data.ComplicationType
-import androidx.wear.watchface.complications.data.NoDataComplicationData
-import androidx.wear.watchface.complications.data.PlainComplicationText
-import androidx.wear.watchface.complications.data.RangedValueComplicationData
-import androidx.wear.watchface.complications.data.ShortTextComplicationData
+import android.content.SharedPreferences
+import androidx.wear.watchface.complications.data.*
+import androidx.wear.watchface.complications.datasource.ComplicationDataSourceService
 import androidx.wear.watchface.complications.datasource.ComplicationRequest
-import androidx.wear.watchface.complications.datasource.SuspendingComplicationDataSourceService
 
-class CurrentClassDataSourceService : SuspendingComplicationDataSourceService() {
+class CurrentClassDataSourceService : ComplicationDataSourceService() {
 
-    override suspend fun onComplicationRequest(request: ComplicationRequest): ComplicationData? {
-        val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+    override fun onComplicationRequest(
+        request: ComplicationRequest,
+        listener: ComplicationRequestListener
+    ) {
+        android.util.Log.d("ComplicationService", "onComplicationRequest called for type: ${request.complicationType}")
+        val prefs: SharedPreferences = getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
         val className = prefs.getString("flutter.class_name", null)
         val room = prefs.getString("flutter.room", null)
-        val classEndsIn = prefs.getLong("flutter.class_ends_in", -1L).toInt()
-        val classTotalDuration = prefs.getLong("flutter.class_total_duration", -1L).toInt()
-        val nextClassName = prefs.getString("flutter.next_class_name", null)
-        val nextClassStartsIn = prefs.getLong("flutter.next_class_starts_in", -1L).toInt()
+        val minutesRemaining = prefs.getLong("flutter.minutes_remaining", -1L).toInt()
+        val totalMinutes = prefs.getLong("flutter.total_minutes", -1L).toInt()
+        
+        android.util.Log.d("ComplicationService", "Data - className: $className, room: $room, minutesRemaining: $minutesRemaining, totalMinutes: $totalMinutes")
 
-        return if (!className.isNullOrEmpty() && !room.isNullOrEmpty() && classEndsIn >= 0 && classTotalDuration > 0) {
-            // Active class with duration info - use ranged value for progress
-            val remaining = classEndsIn.toFloat()
-            val total = classTotalDuration.toFloat()
-            
-            RangedValueComplicationData.Builder(
-                value = remaining,
-                min = 0f,
-                max = total,
-                contentDescription = PlainComplicationText.Builder("$className in $room").build()
-            )
-                .setText(PlainComplicationText.Builder(room).build())
-                .setTitle(PlainComplicationText.Builder(className).build())
-                .setTapAction(createTapIntent())
-                .build()
-        } else if (!className.isNullOrEmpty()) {
-            // Active class - show end time
-            val builder = ShortTextComplicationData.Builder(
-                text = PlainComplicationText.Builder(className).build(),
-                contentDescription = PlainComplicationText.Builder("$className ($room)").build()
-            )
-            
-            if (classEndsIn >= 0) {
-                val endText = if (classEndsIn == 0) "now" else "${classEndsIn}m"
-                builder.setTitle(PlainComplicationText.Builder(endText).build())
-            } else if (!room.isNullOrEmpty()) {
-                builder.setTitle(PlainComplicationText.Builder(room).build())
-            }
-
-            builder.setTapAction(createTapIntent())
-            builder.build()
-        } else if (!nextClassName.isNullOrEmpty()) {
-            // No active class - show next class
-            val builder = ShortTextComplicationData.Builder(
-                text = PlainComplicationText.Builder(nextClassName).build(),
-                contentDescription = PlainComplicationText.Builder(nextClassName).build()
-            )
-            
-            if (nextClassStartsIn >= 0) {
-                val startText = if (nextClassStartsIn == 0) "now" else "${nextClassStartsIn}m"
-                builder.setTitle(PlainComplicationText.Builder(startText).build())
-            }
-
-            builder.setTapAction(createTapIntent())
-            builder.build()
-        } else {
-            NoDataComplicationData()
-        }
-    }
-
-    private fun createTapIntent(): PendingIntent {
-        val intent = Intent().apply {
-            setComponent(ComponentName(this@CurrentClassDataSourceService, MainActivity::class.java))
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        return PendingIntent.getActivity(
-            this,
-            0,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-    }
-
-    override fun getPreviewData(type: ComplicationType): ComplicationData? {
-        return when (type) {
-            ComplicationType.RANGED_VALUE -> {
-                RangedValueComplicationData.Builder(
-                    value = 30f,
-                    min = 0f,
-                    max = 60f,
-                    contentDescription = PlainComplicationText.Builder("Math 101 in Room 204").build()
-                )
-                    .setText(PlainComplicationText.Builder("204").build())
-                    .setTitle(PlainComplicationText.Builder("Math 101").build())
+        val complicationData = when (request.complicationType) {
+            ComplicationType.SHORT_TEXT -> {
+                if (className != null && minutesRemaining >= 0) {
+                    ShortTextComplicationData.Builder(
+                        text = PlainComplicationText.Builder(className).build(),
+                        contentDescription = PlainComplicationText.Builder("Current class: $className").build()
+                    )
+                    .setTitle(PlainComplicationText.Builder("$minutesRemaining min").build())
                     .build()
+                } else {
+                    ShortTextComplicationData.Builder(
+                        text = PlainComplicationText.Builder("--").build(),
+                        contentDescription = PlainComplicationText.Builder("No class").build()
+                    ).build()
+                }
             }
+            ComplicationType.LONG_TEXT -> {
+                if (className != null && room != null && minutesRemaining >= 0) {
+                    LongTextComplicationData.Builder(
+                        text = PlainComplicationText.Builder("$className in $room").build(),
+                        contentDescription = PlainComplicationText.Builder("$className in room $room, $minutesRemaining minutes remaining").build()
+                    )
+                    .setTitle(PlainComplicationText.Builder("$minutesRemaining min left").build())
+                    .build()
+                } else {
+                    LongTextComplicationData.Builder(
+                        text = PlainComplicationText.Builder("No class").build(),
+                        contentDescription = PlainComplicationText.Builder("No class currently").build()
+                    ).build()
+                }
+            }
+            ComplicationType.RANGED_VALUE -> {
+                if (className != null && minutesRemaining >= 0 && totalMinutes > 0) {
+                    val progress = ((totalMinutes - minutesRemaining).toFloat() / totalMinutes.toFloat()) * 100f
+                    RangedValueComplicationData.Builder(
+                        value = progress,
+                        min = 0f,
+                        max = 100f,
+                        contentDescription = PlainComplicationText.Builder("Class progress: ${progress.toInt()}%").build()
+                    )
+                    .setText(PlainComplicationText.Builder(className).build())
+                    .setTitle(PlainComplicationText.Builder("$minutesRemaining min").build())
+                    .build()
+                } else {
+                    RangedValueComplicationData.Builder(
+                        value = 0f,
+                        min = 0f,
+                        max = 100f,
+                        contentDescription = PlainComplicationText.Builder("No class").build()
+                    )
+                    .setText(PlainComplicationText.Builder("--").build())
+                    .build()
+                }
+            }
+            else -> {
+                NoDataComplicationData()
+            }
+        }
+
+        listener.onComplicationData(complicationData)
+    }
+
+    override fun getPreviewData(type: ComplicationType): ComplicationData {
+        return when (type) {
             ComplicationType.SHORT_TEXT -> {
                 ShortTextComplicationData.Builder(
-                    text = PlainComplicationText.Builder("Math 101").build(),
-                    contentDescription = PlainComplicationText.Builder("Math 101 in Room 204").build()
+                    text = PlainComplicationText.Builder("Math").build(),
+                    contentDescription = PlainComplicationText.Builder("Current class: Math").build()
                 )
-                    .setTitle(PlainComplicationText.Builder("Room 204").build())
-                    .build()
+                .setTitle(PlainComplicationText.Builder("25 min").build())
+                .build()
             }
-            else -> null
+            ComplicationType.LONG_TEXT -> {
+                LongTextComplicationData.Builder(
+                    text = PlainComplicationText.Builder("Math in Room 101").build(),
+                    contentDescription = PlainComplicationText.Builder("Math in room 101, 25 minutes remaining").build()
+                )
+                .setTitle(PlainComplicationText.Builder("25 min left").build())
+                .build()
+            }
+            ComplicationType.RANGED_VALUE -> {
+                RangedValueComplicationData.Builder(
+                    value = 50f,
+                    min = 0f,
+                    max = 100f,
+                    contentDescription = PlainComplicationText.Builder("Class progress: 50%").build()
+                )
+                .setText(PlainComplicationText.Builder("Math").build())
+                .setTitle(PlainComplicationText.Builder("25 min").build())
+                .build()
+            }
+            else -> {
+                NoDataComplicationData()
+            }
         }
     }
 }
